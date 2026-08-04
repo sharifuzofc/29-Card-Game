@@ -79,7 +79,7 @@
     <div class="cards" id="cards"></div>
   </main>
 
-  <script type="py" src="./game29.py" async></script>
+  <script type="py" src="./game_browser.py" async></script>
   <script type="text/javascript">
     const status = document.getElementById("status");
     const cards = document.getElementById("cards");
@@ -90,12 +90,12 @@
         return;
       }
       try {
-        const result = window.pyodide.globals.get("browser_demo")();
-        const title = result.get("title");
-        const message = result.get("message");
-        const hand = result.get("hand");
-        status.innerHTML = `<strong>${title}</strong> — ${message}`;
-        cards.innerHTML = hand.toJs().map((card) => `<div class="chip">${card}</div>`).join("");
+        const intro = window.pyodide.globals.get("build_intro")();
+        const cardsList = window.pyodide.globals.get("shuffle_cards")(4);
+        const title = intro.get("title");
+        const subtitle = intro.get("subtitle");
+        status.innerHTML = `<strong>${title}</strong> — ${subtitle}`;
+        cards.innerHTML = cardsList.toJs().map((card) => `<div class="chip">${card}</div>`).join("");
       } catch (error) {
         status.textContent = "Python loaded, but the demo could not render.";
         console.error(error);
