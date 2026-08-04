@@ -83,27 +83,33 @@
     paths: ["./"]
   </py-config>
 
-  <script type="py" src="./game29.py" config='{"packages": []}' async></script>
+  <script type="py" src="./game29.py" async></script>
   <script type="text/javascript">
+    const status = document.getElementById("status");
+    const cards = document.getElementById("cards");
+    const button = document.getElementById("shuffle-btn");
+
+    function renderDemo() {
+      if (!window.pyodide || !window.pyodide.globals) {
+        return;
+      }
+      try {
+        const result = window.pyodide.globals.get("browser_demo")();
+        const title = result.get("title");
+        const message = result.get("message");
+        const hand = result.get("hand");
+        status.innerHTML = `<strong>${title}</strong> — ${message}`;
+        cards.innerHTML = hand.toJs().map((card) => `<div class="chip">${card}</div>`).join("");
+      } catch (error) {
+        status.textContent = "Python loaded, but the demo could not render.";
+        console.error(error);
+      }
+    }
+
     window.addEventListener("DOMContentLoaded", () => {
-      const status = document.getElementById("status");
-      const cards = document.getElementById("cards");
-      const button = document.getElementById("shuffle-btn");
-      const render = () => {
-        if (window.pyodide && window.pyodide.globals) {
-          try {
-            const result = window.pyodide.globals.get("browser_demo")();
-            const hand = result.get("hand");
-            status.innerHTML = `<strong>${result.get("title")}</strong> — ${result.get("message")}`;
-            cards.innerHTML = hand.toJs().map((card) => `<div class="chip">${card}</div>`).join("");
-          } catch (error) {
-            status.textContent = "Python loaded, but the demo could not render.";
-            console.error(error);
-          }
-        }
-      };
-      button.addEventListener("click", render);
-      setTimeout(render, 500);
+      button.addEventListener("click", renderDemo);
+      window.addEventListener("py:ready", renderDemo, { once: true });
+      setTimeout(renderDemo, 800);
     });
   </script>
 </body>
