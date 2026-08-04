@@ -1,11 +1,7 @@
 import random
 import math
-import struct
-import subprocess
-import tempfile
-import os
 import time
-import wave
+
 try:
     import tkinter as tk
     from tkinter import messagebox
@@ -14,6 +10,13 @@ except Exception:
     tk = None
     messagebox = None
     GUI_AVAILABLE = False
+
+# Browser/PyScript-safe flag for the web runtime.
+try:
+    import js  # type: ignore
+    BROWSER_RUNTIME = True
+except Exception:
+    BROWSER_RUNTIME = False
 
 SUITS = ['♠', '♥', '♦', '♣']
 SUIT_NAMES = {'♠': 'Spades', '♥': 'Hearts', '♦': 'Diamonds', '♣': 'Clubs'}
@@ -109,173 +112,14 @@ def lerp(a, b, t):
 #
 # এটি Tkinter/pygame/OS audio backend-এ কাজ করতে পারে।
 class SoundPlayer:
-    """Premium-feeling procedural audio for UI and card-table interactions."""
+    """Browser-safe audio helper that silently no-ops in PyScript/web environments."""
 
     def __init__(self):
         self.enabled = True
-        self._backend = None
-        self._tmp = os.path.join(tempfile.gettempdir(), "29sound.wav")
-        self._last_play = {}
 
     def play(self, kind):
         if not self.enabled:
-            return
-        try:
-            if kind == "button":
-                self._play_sfx([760], 0.055, 0.025, waveform="square", attack=0.003, release=0.018)
-            elif kind == "hover":
-                self._play_sfx([1250, 1520], 0.042, 0.018, waveform="triangle", attack=0.002, release=0.018)
-            elif kind == "card":
-                self._play_sfx([690, 1120], 0.058, 0.032, waveform="sine", attack=0.004, release=0.012)
-            elif kind == "drop":
-                self._play_sfx([420, 680], 0.085, 0.045, waveform="triangle", attack=0.004, release=0.045)
-            elif kind == "shuffle":
-                self._play_sweep(720, 420, 0.13, 0.03, waveform="triangle")
-            elif kind == "bid":
-                self._play_sfx([520, 780, 940], 0.085, 0.038, waveform="sine", attack=0.007, release=0.04)
-            elif kind == "double":
-                self._play_sfx([780, 960, 1240], 0.11, 0.046, waveform="triangle", attack=0.008, release=0.05)
-            else:
-                self._play_sfx([700], 0.05, 0.03, waveform="sine", attack=0.003, release=0.02)
-        except Exception:
-            pass
-
-    def _play_sfx(self, freqs, duration, volume, waveform="sine", attack=0.004, release=0.02):
-        if self._backend is None:
-            self._backend = self._detect_backend()
-        if self._backend is None:
-            return
-        sample_rate = 22050
-        frames = int(sample_rate * duration)
-        if frames <= 0:
-            return
-
-        wave_bytes = bytearray()
-        for i in range(frames):
-            t = i / sample_rate
-            env = self._adsr(i, frames, attack, release)
-            total = 0.0
-            for idx, freq in enumerate(freqs):
-                f = freq * (1.0 + 0.008 * idx)
-                value = self._waveform_value(waveform, f, t, bias=0.0)
-                total += value * (0.8 / max(1, len(freqs)))
-            if len(freqs) > 1:
-                total += 0.18 * self._waveform_value(waveform, freqs[0] * 2.0, t, bias=0.0)
-            sample = int(32767 * volume * env * max(-1.0, min(1.0, total)))
-            wave_bytes.extend(struct.pack("<h", sample))
-
-        self._build_wav(sample_rate, wave_bytes)
-        if self._backend == "pygame":
-            try:
-                import pygame
-                with open(self._tmp, "rb") as fh:
-                    sound = pygame.mixer.Sound(buffer=fh.read())
-                sound.play()
-            except Exception:
-                pass
-            return
-
-        if isinstance(self._backend, (list, tuple)):
-            cmd = list(self._backend)
-        else:
-            cmd = [self._backend]
-
-        try:
-            if cmd and cmd[0] == "afplay":
-                subprocess.Popen(["afplay", self._tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif cmd and cmd[0] in {"aplay", "paplay"}:
-                with open(self._tmp, "rb") as fh:
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    proc.communicate(input=fh.read())
-            else:
-                with open(self._tmp, "rb") as fh:
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    proc.communicate(input=fh.read())
-        except Exception:
-            pass
-
-    def _play_sweep(self, start_freq, end_freq, duration, volume, waveform="sine"):
-        if self._backend is None:
-            self._backend = self._detect_backend()
-        if self._backend is None:
-            return
-        sample_rate = 22050
-        frames = int(sample_rate * duration)
-        wave_bytes = bytearray()
-        for i in range(frames):
-            t = i / sample_rate
-            progress = i / max(1, frames - 1)
-            freq = start_freq + (end_freq - start_freq) * progress
-            env = self._adsr(i, frames, 0.008, 0.03)
-            value = self._waveform_value(waveform, freq, t, bias=0.0)
-            sample = int(32767 * volume * env * value)
-            wave_bytes.extend(struct.pack("<h", sample))
-        self._build_wav(sample_rate, wave_bytes)
-        if self._backend == "pygame":
-            try:
-                import pygame
-                with open(self._tmp, "rb") as fh:
-                    sound = pygame.mixer.Sound(buffer=fh.read())
-                sound.play()
-            except Exception:
-                pass
-            return
-        if isinstance(self._backend, (list, tuple)):
-            cmd = list(self._backend)
-        else:
-            cmd = [self._backend]
-        try:
-            if cmd and cmd[0] == "afplay":
-                subprocess.Popen(["afplay", self._tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                with open(self._tmp, "rb") as fh:
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    proc.communicate(input=fh.read())
-        except Exception:
-            pass
-
-    def _adsr(self, index, frames, attack, release):
-        if frames <= 1:
-            return 1.0
-        attack_frames = max(1, int(frames * attack))
-        release_frames = max(1, int(frames * release))
-        if index < attack_frames:
-            return index / attack_frames
-        if index > frames - release_frames:
-            return (frames - index) / release_frames
-        return 1.0
-
-    def _waveform_value(self, waveform, freq, t, bias=0.0):
-        phase = 2 * math.pi * freq * t + bias
-        if waveform == "square":
-            return 1.0 if math.sin(phase) >= 0 else -1.0
-        if waveform == "triangle":
-            return 2.0 * abs(2.0 * (phase / (2.0 * math.pi) - math.floor(phase / (2.0 * math.pi) + 0.5))) - 1.0
-        if waveform == "saw":
-            return 2.0 * (phase / (2.0 * math.pi) - math.floor(phase / (2.0 * math.pi) + 0.5))
-        return math.sin(phase)
-
-    def _build_wav(self, sample_rate, pcm):
-        with wave.open(self._tmp, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(pcm)
-
-    def _detect_backend(self):
-        try:
-            import pygame
-            if not pygame.mixer.get_init():
-                pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=256)
-            return "pygame"
-        except Exception:
-            pass
-        for cmd in (["afplay"], ["aplay", "-q", "-"], ["paplay", "-q", "-"], ["ffplay", "-nodisp", "-autoexit", "-f", "wav", "-i", "-"]):
-            try:
-                subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                continue
-            return cmd
+            return None
         return None
 
 
@@ -2200,6 +2044,21 @@ class Game29GUI:
 # 5) Application Entry Point
 # =============================================================
 # এই অংশে Tkinter window open করে GUI চালু হয়।
+
+
+def browser_demo():
+    """Small browser-safe demo entry point for PyScript."""
+    game = Game29()
+    game.start_round()
+    hand = [f"{card.rank}{card.suit}" for card in game.players[0].hand[:6]]
+    return {
+        "title": "Twenty-Nine",
+        "phase": game.phase,
+        "message": "PyScript loaded successfully",
+        "hand": hand,
+        "players": [player.name for player in game.players],
+    }
+
 
 if __name__ == '__main__':
     if GUI_AVAILABLE:

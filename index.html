@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Twenty-Nine — PyScript Demo</title>
-  <link rel="stylesheet" href="https://pyscript.net/releases/2024.11.1/core.css" />
-  <script type="module" src="https://pyscript.net/releases/2024.11.1/core.js"></script>
+  <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
+  <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -83,25 +83,28 @@
     paths: ["./"]
   </py-config>
 
-  <py-script>
-from js import document
-from game_browser import build_intro, shuffle_cards
-
-status_el = document.getElementById("status")
-cards_el = document.getElementById("cards")
-
-
-def render_cards():
-    intro = build_intro()
-    status_el.innerHTML = f"<strong>{intro['title']}</strong> — {intro['subtitle']}"
-    cards = shuffle_cards(4)
-    cards_html = "".join(f"<div class=\"chip\">{card}</div>" for card in cards)
-    cards_el.innerHTML = cards_html
-
-render_cards()
-
-button = document.getElementById("shuffle-btn")
-button.addEventListener("click", lambda event: render_cards())
-  </py-script>
+  <script type="py" src="./game29.py" config='{"packages": []}' async></script>
+  <script type="text/javascript">
+    window.addEventListener("DOMContentLoaded", () => {
+      const status = document.getElementById("status");
+      const cards = document.getElementById("cards");
+      const button = document.getElementById("shuffle-btn");
+      const render = () => {
+        if (window.pyodide && window.pyodide.globals) {
+          try {
+            const result = window.pyodide.globals.get("browser_demo")();
+            const hand = result.get("hand");
+            status.innerHTML = `<strong>${result.get("title")}</strong> — ${result.get("message")}`;
+            cards.innerHTML = hand.toJs().map((card) => `<div class="chip">${card}</div>`).join("");
+          } catch (error) {
+            status.textContent = "Python loaded, but the demo could not render.";
+            console.error(error);
+          }
+        }
+      };
+      button.addEventListener("click", render);
+      setTimeout(render, 500);
+    });
+  </script>
 </body>
 </html>
