@@ -1,0 +1,1083 @@
+import random
+import math
+import struct
+import subprocess
+import wave
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+    GUI_AVAILABLE = True
+except Exception:
+    tk = None
+    messagebox = None
+    GUI_AVAILABLE = False
+
+SUITS = ['♠', '♥', '♦', '♣']
+SUIT_NAMES = {'♠': 'Spades', '♥': 'Hearts', '♦': 'Diamonds', '♣': 'Clubs'}
+SUIT_COLORS = {'♠': '#1a1a1a', '♣': '#1a1a1a', '♥': '#d10000', '♦': '#d10000'}
+RANKS = ['7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+CARD_POINTS = {'J': 3, '9': 2, 'A': 1, '10': 1, 'K': 0, 'Q': 0, '8': 0, '7': 0}
+RANK_ORDER = {'7': 0, '8': 1, 'Q': 2, 'K': 3, '10': 4, 'A': 5, '9': 6, 'J': 7}
+
+COL_FELT = "#0b6623"
+COL_GOLD = "#f5d76e"
+COL_GOLD_DARK = "#c9a227"
+COL_CARD = "#fdfdf7"
+COL_CARD_DIS = "#cfd3cc"
+COL_ACCENT = "#9b59b6"
+COL_GLOW = "#ffe680"
+
+BACK_BG = "#16305c"
+BACK_INNER = "#1b3a6b"
+
+PLAYER_EMOJI = {0: "😎", 1: "🙂", 2: "😀", 3: "😏"}
+
+
+class SoundPlayer:
+    def __init__(self):
+        self.enabled = True
+        self._backend = None
+
+    def play(self, kind):
+        if not self.enabled:
+            return
+        try:
+            if kind == "button":
+                self._play_tone(760, 0.06, 0.08)
+            elif kind == "card":
+                self._play_tone(820, 0.05, 0.07)
+                self._play_tone(1080, 0.04, 0.05)
+            elif kind == "bid":
+                self._play_tone(620, 0.08, 0.10)
+            elif kind == "double":
+                self._play_tone(900, 0.06, 0.08)
+                self._play_tone(1200, 0.08, 0.08)
+            else:
+                self._play_tone(700, 0.05, 0.06)
+        except Exception:
+            pass
+
+    def _play_tone(self, freq, duration, volume):
+        if self._backend is None:
+            self._backend = self._detect_backend()
+        if self._backend is None:
+            return
+        sample_rate = 22050
+        frames = int(sample_rate * duration)
+        wave_bytes = bytearray()
+        for i in range(frames):
+            t = i / sample_rate
+            value = int(32767 * volume * math.sin(2 * math.pi * freq * t) * (0.8 if i < frames * 0.8 else 0.2))
+            wave_bytes.extend(struct.pack("<h", value))
+
+        buf = self._build_wav(sample_rate, wave_bytes)
+        if self._backend == "pygame":
+            try:
+                import pygame
+                sound = pygame.mixer.Sound(buffer=buf)
+                sound.play()
+            except Exception:
+                pass
+            return
+
+        cmd = self._backend
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.communicate(input=buf)
+        except Exception:
+            pass
+
+    def _build_wav(self, sample_rate, pcm):
+        with wave.open("/tmp/29sound.wav", "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm)
+        with open("/tmp/29sound.wav", "rb") as fh:
+            return fh.read()
+
+    def _detect_backend(self):
+        try:
+            import pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=256)
+            return "pygame"
+        except Exception:
+            pass
+        for cmd in (["aplay", "-q", "-"], ["paplay", "-q", "-"], ["ffplay", "-nodisp", "-autoexit", "-f", "wav", "-i", "-"]):
+            try:
+                subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                continue
+            return cmd
+        return None
+
+
+class Card:
+    def __init__(self, suit, rank):
+        self.suit = suit
+        self.rank = rank
+        self.points = CARD_POINTS[rank]
+
+    def __repr__(self):
+        return f"{self.rank}{self.suit}"
+
+    def __eq__(self, other):
+        return isinstance(other, Card) and self.suit == other.suit and self.rank == other.rank
+
+    def __hash__(self):
+        return hash((self.suit, self.rank))
+
+
+class Player:
+    def __init__(self, name, index, is_human=False):
+        self.name = name
+        self.index = index
+        self.is_human = is_human
+        self.hand = []
+        self.team = index % 2
+
+    def has_suit(self, suit):
+        return any(c.suit == suit for c in self.hand)
+
+
+class Game29:
+    def __init__(self):
+        self.reset_game()
+
+    def reset_game(self):
+        self.game_scores = [0, 0]
+        self.dealer = random.randint(0, 3)
+        self.start_round()
+
+    def start_round(self):
+        self.deck = [Card(s, r) for s in SUITS for r in RANKS]
+        random.shuffle(self.deck)
+        for p in self.players:
+            p.hand = []
+        self.dealer = (self.dealer + 1) % 4
+        self.bidder_start = (self.dealer + 1) % 4
+        for _ in range(4):
+            for i in range(4):
+                self.players[(self.bidder_start + i) % 4].hand.append(self.deck.pop())
+        self.bid_value = 15
+        self.highest_bidder = None
+        self.bid_winner = None
+        self.bid_amount = 0
+        self.trump_suit = None
+        self.trump_revealed = False
+        self.trump_card = None
+        self.multiplier = 1
+        self.doubled_by = None
+        self.redoubled = False
+        self.current_trick = []
+        self.trick_leader = None
+        self.tricks_won_points = [0, 0]
+        self.tricks_count = 0
+        self.last_trick_winner = None
+        self.pair_claimed = [False, False]
+        self.phase = "BIDDING"
+        self.current_player = self.bidder_start
+        self.passes = 0
+        self.bid_history = []
+        self.last_bid_label = {0: "", 1: "", 2: "", 3: ""}
+
+    players = [
+        Player("You (South)", 0, is_human=True),
+        Player("West", 1),
+        Player("North (Partner)", 2),
+        Player("East", 3),
+    ]
+
+    def deal_remaining(self):
+        for _ in range(4):
+            for i in range(4):
+                p = self.players[(self.bidder_start + i) % 4]
+                if self.deck:
+                    p.hand.append(self.deck.pop())
+
+    def can_bid(self, amount):
+        return 16 <= amount <= 28 and amount > self.bid_value
+
+    def place_bid(self, player_index, amount):
+        if amount == 0:
+            self.bid_history.append((player_index, "Pass"))
+            self.passes += 1
+            self.last_bid_label[player_index] = "PASS"
+        else:
+            self.bid_value = amount
+            self.highest_bidder = player_index
+            self.bid_amount = amount
+            self.bid_history.append((player_index, str(amount)))
+            self.passes = 0
+            self.last_bid_label[player_index] = str(amount)
+
+    def bidding_complete(self):
+        if self.highest_bidder is not None and self.passes >= 3:
+            return True
+        if self.highest_bidder is None and self.passes >= 4:
+            return True
+        return False
+
+    def ai_bid_decision(self, player):
+        hp = sum(c.points for c in player.hand)
+        jacks = sum(1 for c in player.hand if c.rank == 'J')
+        nines = sum(1 for c in player.hand if c.rank == '9')
+        sc = {}
+        for c in player.hand:
+            sc[c.suit] = sc.get(c.suit, 0) + 1
+        best_len = max(sc.values()) if sc else 0
+        strength = hp + jacks * 2 + nines + best_len
+        target = self.bid_value + 1
+        if strength >= 9 and target <= 20:
+            return target
+        if strength >= 7 and target <= 18:
+            return target
+        if strength >= 5 and target <= 17 and self.highest_bidder is None:
+            return 16
+        return 0
+
+    def ai_select_trump(self, player):
+        sc, sp = {}, {}
+        for c in player.hand:
+            sc[c.suit] = sc.get(c.suit, 0) + 1
+            sp[c.suit] = sp.get(c.suit, 0) + c.points
+        return max(SUITS, key=lambda s: sc.get(s, 0) * 2 + sp.get(s, 0))
+
+    def valid_moves(self, player):
+        if not self.current_trick:
+            return player.hand[:]
+        lead = self.current_trick[0][1].suit
+        same = [c for c in player.hand if c.suit == lead]
+        return same if same else player.hand[:]
+
+    def can_reveal_trump(self, player):
+        if self.trump_revealed or not self.trump_suit:
+            return False
+        if not self.current_trick:
+            return False
+        lead = self.current_trick[0][1].suit
+        return not player.has_suit(lead)
+
+    def play_card(self, player_index, card):
+        self.players[player_index].hand.remove(card)
+        self.current_trick.append((player_index, card))
+
+    def resolve_trick(self):
+        lead = self.current_trick[0][1].suit
+        trump = self.trump_suit if self.trump_revealed else None
+        bi = self.current_trick[0][0]
+        bc = self.current_trick[0][1]
+        for (pidx, card) in self.current_trick[1:]:
+            bc, bi = self._compare_cards(bc, bi, card, pidx, lead, trump)
+        tp = sum(c.points for (_, c) in self.current_trick)
+        wt = self.players[bi].team
+        self.tricks_won_points[wt] += tp
+        self.tricks_count += 1
+        self.last_trick_winner = bi
+        if self.tricks_count == 8:
+            self.tricks_won_points[wt] += 1
+        self.current_trick = []
+        self.trick_leader = bi
+        self.current_player = bi
+        return bi
+
+    def _compare_cards(self, c1, i1, c2, i2, lead, trump):
+        t1 = (trump and c1.suit == trump)
+        t2 = (trump and c2.suit == trump)
+        if t1 and not t2:
+            return c1, i1
+        if t2 and not t1:
+            return c2, i2
+        if t1 and t2:
+            return (c1, i1) if RANK_ORDER[c1.rank] > RANK_ORDER[c2.rank] else (c2, i2)
+        l1 = c1.suit == lead
+        l2 = c2.suit == lead
+        if l1 and not l2:
+            return c1, i1
+        if l2 and not l1:
+            return c2, i2
+        if l1 and l2:
+            return (c1, i1) if RANK_ORDER[c1.rank] > RANK_ORDER[c2.rank] else (c2, i2)
+        return c1, i1
+
+    def can_claim_pair(self, player):
+        if not self.trump_suit:
+            return False
+        hk = any(c.rank == 'K' and c.suit == self.trump_suit for c in player.hand)
+        hq = any(c.rank == 'Q' and c.suit == self.trump_suit for c in player.hand)
+        return hk and hq
+
+    def pair_bonus_value(self):
+        return 4
+
+    def claim_pair(self, player_index):
+        team = self.players[player_index].team
+        if not self.pair_claimed[team]:
+            self.pair_claimed[team] = True
+            self.tricks_won_points[team] += self.pair_bonus_value()
+            return True
+        return False
+
+    def score_round(self):
+        bt = self.players[self.bid_winner].team
+        ot = 1 - bt
+        bp = self.tricks_won_points[bt]
+        made = bp >= self.bid_amount
+        res = {'made': made, 'bidder_points': bp, 'bid_amount': self.bid_amount}
+        change = 1 * self.multiplier
+        if made:
+            self.game_scores[bt] += change
+            res['winner_team'] = bt
+        else:
+            self.game_scores[ot] += change
+            res['winner_team'] = ot
+        res['multiplier'] = self.multiplier
+        return res
+
+
+class Game29GUI:
+    CARD_W = 70
+    CARD_H = 100
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("♠ 29 CARD GAME — Premium Edition ♣")
+        self.W, self.H = 1180, 800
+        self.root.geometry(f"{self.W}x{self.H}")
+        self.root.configure(bg="#062814")
+        self.root.resizable(False, False)
+        
+        self.game = Game29()
+        self.game.start_round()
+        self.anim_running = False
+        self.in_menu = True
+        
+        self.canvas = tk.Canvas(self.root, width=self.W, height=self.H,
+                                highlightthickness=0, bg=COL_FELT)
+        self.canvas.pack(fill="both", expand=True)
+        
+        self.hand_hit = []
+        self.button_hit = []
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.hover_card = None
+        self.message_text = ""
+        self.sound = SoundPlayer()
+        self.sound_toggle_active = True
+
+        self.draw_static_bg()
+        self.show_menu()
+
+    def draw_static_bg(self):
+        """Draw background only once"""
+        for i in range(0, self.H, 2):
+            t = i / self.H
+            r = int(0x0a + (0x0b - 0x0a) * t)
+            g = int(0x3d + (0x66 - 0x3d) * (1 - abs(t - 0.5) * 2))
+            b = int(0x1f + (0x23 - 0x1f) * t)
+            self.canvas.create_line(0, i, self.W, i, fill=f"#{r:02x}{g:02x}{b:02x}", width=2)
+        cx, cy = self.W // 2, 380
+        for rad in range(300, 0, -24):
+            self.canvas.create_oval(cx - rad, cy - rad * 0.7, cx + rad, cy + rad * 0.7,
+                                    outline="", fill="#0d5226" if rad > 150 else "#157a32")
+        self.canvas.create_rectangle(8, 8, self.W - 8, self.H - 8, outline=COL_GOLD, width=4)
+        self.canvas.create_rectangle(16, 16, self.W - 16, self.H - 16, outline=COL_GOLD_DARK, width=1)
+
+    def round_rect(self, x1, y1, x2, y2, r, **kw):
+        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+               x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        return self.canvas.create_polygon(pts, smooth=True, **kw)
+
+    def show_menu(self):
+        """Render a polished start menu in a dedicated upper panel."""
+        self.in_menu = True
+        self.canvas.delete("all")
+        self.draw_static_bg()
+        self.button_hit = []
+        self.hand_hit = []
+
+        panel_x1, panel_y1 = 90, 86
+        panel_x2, panel_y2 = self.W - 90, 520
+        # outer drop shadow
+        self.round_rect(panel_x1 + 8, panel_y1 + 8, panel_x2 + 8, panel_y2 + 8, 24,
+                        fill="#031108", outline="", width=0, tags="menu")
+        # main panel and inner surface
+        self.round_rect(panel_x1, panel_y1, panel_x2, panel_y2, 28,
+                        fill="#0f2f1b", outline=COL_GOLD, width=3, tags="menu")
+        inner_pad = 14
+        self.round_rect(panel_x1 + inner_pad, panel_y1 + inner_pad, panel_x2 - inner_pad, panel_y2 - inner_pad, 22,
+                        fill="#163d24", outline=COL_GOLD_DARK, width=1, tags="menu")
+
+        # Header texts
+        self.canvas.create_text(self.W // 2, 138, text="♠ ♥  29 CARD GAME  ♦ ♣",
+                                font=("Georgia", 32, "bold"), fill=COL_GOLD, tags="menu")
+        self.canvas.create_text(self.W // 2, 174, text="Premium Edition",
+                                font=("Georgia", 15, "italic"), fill="#f7ebbf", tags="menu")
+        self.canvas.create_line(panel_x1 + 30, 202, panel_x2 - 30, 202, fill="#d9b751", width=1, tags="menu")
+
+        for i, s in enumerate(SUITS):
+            self.canvas.create_text(self.W // 2 - 120 + i * 60, 232, text=s,
+                                    font=("Arial", 34),
+                                    fill=SUIT_COLORS[s] if s in '♠♣' else "#ff5555", tags="menu")
+
+        self.canvas.create_text(self.W // 2, 282, text="Choose a fresh round or continue the current game.",
+                                font=("Arial", 12), fill="#e8f2e2", tags="menu")
+
+        # Buttons: compute vertical placement so they stay well inside panel
+        bw, bh = 280, 56
+        gap = 18
+        total_h = 3 * bh + 2 * gap
+        panel_h = panel_y2 - panel_y1
+        # prefer placing buttons below header area; ensure inside panel
+        preferred_y = panel_y1 + 220
+        button_y = max(preferred_y, panel_y1 + (panel_h - total_h) // 2)
+        bx = self.W // 2 - bw // 2
+        self.draw_button(bx, button_y, bw, bh, "▶  CONTINUE", self.menu_continue,
+                         bg="#3c8c4a", fg="white", size=16)
+        self.draw_button(bx, button_y + 72, bw, bh, "🔄  NEW GAME", self.menu_new_game,
+                         bg="#f0ad4e", fg="#222", size=16)
+        self.draw_button(bx, button_y + 144, bw, bh, "✖  EXIT GAME", self.exit_game,
+                         bg="#d9534f", fg="white", size=16)
+
+    def menu_continue(self):
+        self.in_menu = False
+        self.refresh_all()
+        self.process_phase()
+
+    def menu_new_game(self):
+        self.in_menu = False
+        self.game.reset_game()
+        self.game.start_round()
+        self.refresh_all()
+        self.process_phase()
+
+    def draw_card_back(self, x, y, w, h, tag="t"):
+        self.round_rect(x, y, x + w, y + h, max(6, int(w * 0.17)),
+                        fill=BACK_BG, outline=COL_GOLD, width=2, tags=tag)
+        self.round_rect(x + w * 0.08, y + h * 0.07, x + w * 0.92, y + h * 0.93,
+                        max(4, int(w * 0.12)), fill=BACK_INNER,
+                        outline=COL_GOLD_DARK, width=1, tags=tag)
+        mx, my = x + w / 2, y + h / 2
+        ds = w * 0.22
+        self.canvas.create_polygon(mx, my - ds, mx + ds, my, mx, my + ds, mx - ds, my,
+                                   outline=COL_GOLD, fill="", width=1, tags=tag)
+        di = ds * 0.55
+        self.canvas.create_polygon(mx, my - di, mx + di, my, mx, my + di, mx - di, my,
+                                   outline=COL_GOLD_DARK, fill="", width=1, tags=tag)
+        self.canvas.create_text(mx, my, text="♠", font=("Arial", max(8, int(w * 0.24))),
+                                 fill=COL_GOLD, tags=tag)
+        cs = max(6, int(w * 0.13))
+        for (px, py) in [(x + w * 0.16, y + h * 0.13), (x + w * 0.84, y + h * 0.13),
+                         (x + w * 0.16, y + h * 0.87), (x + w * 0.84, y + h * 0.87)]:
+            self.canvas.create_text(px, py, text="❖", font=("Arial", cs), fill=COL_GOLD_DARK, tags=tag)
+
+    def draw_card(self, x, y, card, playable=True, glow=False, face=True, tag="t"):
+        w, h = self.CARD_W, self.CARD_H
+        if glow:
+            self.round_rect(x - 4, y - 4, x + w + 4, y + h + 4, 14, fill=COL_GLOW, outline="", tags=tag)
+        self.round_rect(x + 3, y + 4, x + w + 3, y + h + 4, 12, fill="#04240f", outline="", tags=tag)
+        if not face:
+            self.draw_card_back(x, y, w, h, tag)
+            return
+        body = COL_CARD if playable else COL_CARD_DIS
+        self.round_rect(x, y, x + w, y + h, 12, fill=body,
+                        outline=COL_GOLD_DARK if playable else "#9aa195", width=2, tags=tag)
+        self.round_rect(x + 4, y + 4, x + w - 4, y + h - 4, 8, fill="", outline="#e8e2c8", width=1, tags=tag)
+        col = SUIT_COLORS[card.suit] if playable else "#777"
+        self.canvas.create_text(x + 14, y + 16, text=card.rank, font=("Georgia", 14, "bold"), fill=col, tags=tag)
+        self.canvas.create_text(x + 14, y + 34, text=card.suit, font=("Arial", 14), fill=col, tags=tag)
+        self.canvas.create_text(x + w / 2, y + h / 2, text=card.suit, font=("Arial", 30, "bold"), fill=col, tags=tag)
+        self.canvas.create_text(x + w - 14, y + h - 16, text=card.rank, font=("Georgia", 14, "bold"), fill=col, tags=tag)
+
+    def draw_button(self, x, y, w, h, text, callback, bg=COL_GOLD, fg="#222", size=11):
+        self.round_rect(x + 2, y + 3, x + w + 2, y + h + 3, 10, fill="#04240f", outline="", tags="ui")
+        self.round_rect(x, y, x + w, y + h, 10, fill=bg, outline=COL_GOLD_DARK, width=2, tags="ui")
+        self.canvas.create_text(x + w / 2, y + h / 2, text=text, font=("Arial", size, "bold"), fill=fg, tags="ui")
+        self.button_hit.append((x, y, x + w, y + h, callback))
+
+    def refresh_all(self):
+        """💯 ONLY DELETE DYNAMIC ELEMENTS - FIX 2"""
+        if self.in_menu:
+            return
+        
+        # DELETE ONLY GAME ELEMENTS
+        self.canvas.delete("dyn")
+        self.canvas.delete("ui")
+        self.canvas.delete("menu")
+        self.canvas.delete("hand")
+        self.canvas.delete("anim")
+        # BACKGROUND STAYS
+        
+        self.hand_hit = []
+        self.button_hit = []
+        
+        self.draw_scoreboard()
+        self.draw_trump_panel()
+        self.draw_players_and_trick()
+        self.draw_left_panel()
+        self.draw_hand()
+        self.draw_message()
+        self.draw_sound_toggle()
+
+    def draw_scoreboard(self):
+        t0, t1 = self.game.game_scores
+        self.canvas.create_text(self.W // 2, 34, text="♠ ♥  29 CARD GAME  ♦ ♣",
+                                font=("Georgia", 22, "bold"), fill=COL_GOLD, tags="dyn")
+        self.draw_score_track(40, 70, "YOUR TEAM", t0, "#27ae60")
+        self.draw_score_track(self.W - 300, 70, "OPPONENTS", t1, "#c0392b")
+
+    def draw_score_track(self, x, y, label, score, labelcol):
+        self.canvas.create_text(x + 130, y, text=label, font=("Arial", 13, "bold"),
+                                fill=labelcol, tags="dyn")
+        for i in range(6):
+            cx = x + i * 44
+            cy = y + 18
+            lit = i < score
+            if lit:
+                self.round_rect(cx, cy, cx + 38, cy + 50, 6, fill="#d10000",
+                                outline=COL_GOLD, width=2, tags="dyn")
+                self.canvas.create_text(cx + 19, cy + 25, text="♥",
+                                        font=("Arial", 16, "bold"), fill="white", tags="dyn")
+            else:
+                self.round_rect(cx, cy, cx + 38, cy + 50, 6, fill="#1a1a1a",
+                                outline="#444", width=1, tags="dyn")
+                self.canvas.create_text(cx + 19, cy + 25, text="♠",
+                                        font=("Arial", 14), fill="#666", tags="dyn")
+        self.canvas.create_text(x + 130, y + 92, text=f"{score} / 6  (Black→Red)",
+                                font=("Arial", 11, "italic"), fill="white", tags="dyn")
+
+    def draw_trump_panel(self):
+        px, py = self.W - 175, 470
+        self.round_rect(px, py, px + 150, py + 210, 14, fill="#063d16",
+                        outline=COL_GOLD, width=2, tags="dyn")
+        self.canvas.create_text(px + 75, py + 22, text="TRUMP", font=("Georgia", 14, "bold"),
+                                fill=COL_GOLD, tags="dyn")
+        cx, cy = px + 40, py + 42
+        g = self.game
+        if g.trump_suit:
+            if g.trump_revealed:
+                tc = Card(g.trump_suit, 'A')
+                self.draw_card(cx, cy, tc, playable=True, glow=True, tag="dyn")
+                self.canvas.create_text(px + 75, py + 158, text=f"{SUIT_NAMES[g.trump_suit]}",
+                                        font=("Arial", 11, "bold"), fill="white", tags="dyn")
+                self.canvas.create_text(px + 75, py + 176, text="(REVEALED)",
+                                        font=("Arial", 9, "bold"), fill="#5cd6ff", tags="dyn")
+            else:
+                self.draw_card(cx, cy, None, face=False, tag="dyn")
+                self.canvas.create_text(px + 75, py + 158, text="HIDDEN",
+                                        font=("Arial", 11, "bold"), fill="#ff9a3c", tags="dyn")
+                human = g.players[0]
+                if (g.phase == "PLAY" and not g.trump_revealed
+                        and g.current_player == 0 and g.can_reveal_trump(human)):
+                    self.draw_button(px + 12, py + 172, 126, 30, "👁 Reveal Trump",
+                                     self.human_reveal_trump, bg="#e67e22", fg="white", size=9)
+        else:
+            self.canvas.create_text(px + 75, py + 100, text="—\nnot set",
+                                    font=("Arial", 11), fill="#8fbf9f", tags="dyn")
+
+    def draw_sound_toggle(self):
+        x, y, w, h = 28, 28, 92, 32
+        label = "🔊 Sound ON" if self.sound_toggle_active else "🔈 Sound OFF"
+        self.round_rect(x, y, x + w, y + h, 10, fill="#0c2f1b", outline=COL_GOLD_DARK, width=1, tags="dyn")
+        self.canvas.create_text(x + w // 2, y + h // 2, text=label,
+                                font=("Arial", 9, "bold"), fill=COL_GLOW, tags="dyn")
+        self.button_hit.append((x, y, x + w, y + h, self.toggle_sound))
+
+    def toggle_sound(self):
+        self.sound_toggle_active = not self.sound_toggle_active
+        self.sound.enabled = self.sound_toggle_active
+        self.refresh_all()
+
+    def draw_left_panel(self):
+        g = self.game
+        bx = 30
+        
+        if g.bid_winner is not None:
+            bname = g.players[g.bid_winner].name
+            txt = f"HIGH BID: {g.bid_amount}  x{g.multiplier}\nby {bname}"
+        elif g.highest_bidder is not None:
+            txt = f"HIGH BID: {g.bid_value}\n(bidding…)"
+        else:
+            txt = "HIGH BID: —"
+        
+        info_y = self.H - 150
+        self.round_rect(bx, info_y, bx + 150, info_y + 40, 8,
+                        fill="#04240f", outline=COL_GOLD_DARK, width=1, tags="dyn")
+        self.canvas.create_text(bx + 75, info_y + 20, text=txt,
+                                font=("Arial", 9, "bold"), fill=COL_GOLD, tags="dyn")
+        self.canvas.create_text(bx + 75, info_y - 26, text="STATUS",
+                                font=("Arial", 8, "bold"), fill=COL_GLOW, tags="dyn")
+        
+        by = info_y + 50
+        self.draw_button(bx, by, 150, 32, "🔄 New Game", self.new_game,
+                         bg="#f0ad4e", fg="#222", size=10)
+        self.draw_button(bx, by + 38, 150, 32, "✖ Exit Game", self.exit_game,
+                         bg="#d9534f", fg="white", size=10)
+
+    def new_game(self):
+        if messagebox.askyesno("New Game", "Start a brand new game?"):
+            self.anim_running = False
+            self.game.reset_game()
+            self.game.start_round()
+            self.refresh_all()
+            self.process_phase()
+
+    def exit_game(self):
+        if messagebox.askyesno("Exit", "Quit the game?"):
+            self.root.quit()
+
+    def draw_players_and_trick(self):
+        cx, cy = self.W // 2 - 60, 380
+        g = self.game
+        self.draw_opp_fan(self.W // 2 - 110, 146, len(g.players[2].hand), "h")
+        self.draw_opp_fan(150, 312, len(g.players[1].hand), "v")
+        self.draw_opp_fan(self.W - 215, 312, len(g.players[3].hand), "v")
+
+        self.player_profile(self.W // 2, 78, 2, g.current_player == 2)
+        self.player_profile(90, 286, 1, g.current_player == 1)
+        self.player_profile(self.W - 90, 286, 3, g.current_player == 3)
+        self.player_profile(self.W // 2, 588, 0, g.current_player == 0)
+
+        slots = {0: (cx, cy + 70), 1: (cx - 90, cy), 2: (cx, cy - 70), 3: (cx + 90, cy)}
+        for (pidx, card) in g.current_trick:
+            x, y = slots[pidx]
+            self.draw_card(x, y, card, playable=True, tag="dyn")
+
+    def draw_opp_fan(self, x, y, n, orient):
+        for i in range(max(0, n)):
+            if orient == "h":
+                self.draw_card_back(x + i * 22, y, 34, 48, "dyn")
+            else:
+                self.draw_card_back(x, y + i * 16, 48, 34, "dyn")
+
+    def player_profile(self, x, y, pidx, active):
+        g = self.game
+        name = g.players[pidx].name.split(" (")[0]
+        emoji = PLAYER_EMOJI[pidx]
+        rr = 18
+        ay = y
+        ring = COL_GOLD if active else "#0e4a22"
+        self.canvas.create_oval(x - rr, ay - rr, x + rr, ay + rr,
+                                fill="#fff7e0", outline=ring, width=3, tags="dyn")
+        self.canvas.create_text(x, ay, text=emoji, font=("Arial", 20), tags="dyn")
+
+        label = g.last_bid_label.get(pidx, "")
+        if label:
+            if pidx == 1:
+                lx = x - 82
+                by = ay + 18
+            else:
+                lx = x + rr + 6
+                by = ay
+            self.round_rect(lx, by - 12, lx + 50, by + 12, 8,
+                            fill="white", outline=COL_GOLD_DARK, width=2, tags="dyn")
+            self.canvas.create_text(lx + 25, by, text=label, font=("Arial", 9, "bold"),
+                                    fill="#c0392b" if label == "PASS" else "#1565c0", tags="dyn")
+
+        w = 100
+        ny = y + 34
+        bg = COL_GOLD if active else "#0e4a22"
+        fg = "#222" if active else "white"
+        self.round_rect(x - w // 2, ny, x + w // 2, ny + 24, 10, fill=bg,
+                        outline=COL_GOLD, width=2, tags="dyn")
+        self.canvas.create_text(x, ny + 12, text=("▶ " if active else "") + name,
+                                font=("Arial", 9, "bold"), fill=fg, tags="dyn")
+
+    def draw_hand(self):
+        human = self.game.players[0]
+        hand_sorted = sorted(human.hand, key=lambda c: (c.suit, RANK_ORDER[c.rank]))
+        human.hand = hand_sorted
+        valid = self.game.valid_moves(human) if self.game.phase == "PLAY" else []
+        n = len(hand_sorted)
+        if n == 0:
+            return
+        total_w = n * (self.CARD_W + 12)
+        start_x = (self.W - total_w) // 2
+        y = 665
+        for i, card in enumerate(hand_sorted):
+            playable = (self.game.phase == "PLAY" and self.game.current_player == 0 and card in valid)
+            yy = y - (14 if (self.hover_card is card and playable) else 0)
+            self.draw_card(start_x + i * (self.CARD_W + 12), yy, card,
+                           playable=playable, glow=playable, tag="hand")
+            self.hand_hit.append((start_x + i * (self.CARD_W + 12), yy,
+                                  start_x + i * (self.CARD_W + 12) + self.CARD_W, yy + self.CARD_H,
+                                  card, playable))
+
+    def draw_message(self):
+        if not self.message_text:
+            return
+        x1 = 210
+        y1 = 118
+        x2 = 620
+        y2 = y1 + 38
+        self.round_rect(x1, y1, x2, y2, 10,
+                        fill="#05160a", outline=COL_GOLD_DARK, width=1, tags="dyn")
+        self.canvas.create_text((x1 + x2) / 2, y1 + 19, text=self.message_text,
+                                font=("Arial", 9, "bold"), fill=COL_GLOW, tags="dyn")
+
+    def set_message(self, text):
+        self.message_text = text
+        self.refresh_all()
+
+    def on_click(self, e):
+        for (x1, y1, x2, y2, cb) in self.button_hit:
+            if x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                self.sound.play("button")
+                cb()
+                return
+        if self.in_menu:
+            return
+        for (x1, y1, x2, y2, card, playable) in self.hand_hit:
+            if playable and x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                self.human_play(card)
+                return
+
+    def on_motion(self, e):
+        if self.in_menu:
+            return
+        new = None
+        for (x1, y1, x2, y2, card, playable) in self.hand_hit:
+            if playable and x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                new = card
+                break
+        if new != self.hover_card:
+            self.hover_card = new
+            self.canvas.delete("hand")
+            self.hand_hit = []
+            self.draw_hand()
+
+    def animate_card(self, card, from_xy, to_xy, after):
+        steps = 22
+        self.anim_running = True
+
+        def step(i):
+            if i > steps:
+                self.anim_running = False
+                after()
+                return
+            t = i / steps
+            ease = t * t * (3 - 2 * t)
+            x = from_xy[0] + (to_xy[0] - from_xy[0]) * ease
+            y = from_xy[1] + (to_xy[1] - from_xy[1]) * ease
+            self.canvas.delete("anim")
+            self.draw_card(x, y, card, playable=True, tag="anim")
+            self.root.after(14, lambda: step(i + 1))
+
+        step(0)
+
+    def process_phase(self):
+        if self.in_menu:
+            return
+        ph = self.game.phase
+        if ph == "BIDDING":
+            self.process_bidding()
+        elif ph == "TRUMP_SELECT":
+            self.process_trump_select()
+        elif ph == "PLAY":
+            self.process_play()
+        elif ph == "ROUND_END":
+            self.process_round_end()
+
+    def process_bidding(self):
+        if self.game.bidding_complete():
+            self.finish_bidding()
+            return
+        cur = self.game.current_player
+        player = self.game.players[cur]
+        if player.is_human:
+            self.show_bidding_controls()
+        else:
+            amount = self.game.ai_bid_decision(player)
+            if not self.game.can_bid(amount):
+                amount = 0
+            self.game.place_bid(cur, amount)
+            self.sound.play("bid")
+            self.refresh_all()
+            self.game.current_player = (cur + 1) % 4
+            self.root.after(950, self.process_bidding)
+
+    def show_bidding_controls(self):
+        self.refresh_all()
+        y = 420
+        self.canvas.create_text(self.W // 2, y - 26, text="Your bid:",
+                                font=("Arial", 14, "bold"), fill="white", tags="ui")
+        min_bid = max(16, self.game.bid_value + 1)
+        x = self.W // 2 - 210
+        for amt in range(min_bid, min(min_bid + 6, 29)):
+            self.draw_button(x, y, 56, 40, str(amt), lambda a=amt: self.human_bid(a))
+            x += 64
+        self.draw_button(x + 10, y, 86, 40, "PASS", lambda: self.human_bid(0), bg="#d9534f", fg="white")
+
+    def human_bid(self, amount):
+        self.game.place_bid(0, amount)
+        self.sound.play("bid")
+        self.game.current_player = (self.game.current_player + 1) % 4
+        self.refresh_all()
+        self.root.after(650, self.process_bidding)
+
+    def finish_bidding(self):
+        if self.game.highest_bidder is None:
+            self.set_message("All passed. Redealing…")
+            self.root.after(1500, self.redeal)
+            return
+        self.game.bid_winner = self.game.highest_bidder
+        self.game.bid_amount = self.game.bid_value
+        w = self.game.players[self.game.bid_winner]
+        self.game.last_bid_label = {0: "", 1: "", 2: "", 3: ""}
+        self.set_message(f"{w.name} won the bid at {self.game.bid_amount}!")
+        self.game.phase = "TRUMP_SELECT"
+        self.root.after(1200, self.process_trump_select)
+
+    def redeal(self):
+        self.game.start_round()
+        self.refresh_all()
+        self.process_phase()
+
+    def process_trump_select(self):
+        w = self.game.players[self.game.bid_winner]
+        if w.is_human:
+            self.show_trump_controls()
+        else:
+            trump = self.game.ai_select_trump(w)
+            self.game.trump_suit = trump
+            self.game.trump_card = next((c for c in w.hand if c.suit == trump), None)
+            self.set_message(f"{w.name} selected trump (hidden).")
+            self.finalize_trump()
+
+    def show_trump_controls(self):
+        self.refresh_all()
+        y = 420
+        self.canvas.create_text(self.W // 2, y - 28, text="Select TRUMP:",
+                                font=("Arial", 14, "bold"), fill="white", tags="ui")
+        x = self.W // 2 - 120
+        for s in SUITS:
+            self.draw_button(x, y, 56, 50, s, lambda su=s: self.human_select_trump(su),
+                             bg="white", fg=SUIT_COLORS[s], size=20)
+            x += 72
+
+    def human_select_trump(self, suit):
+        self.game.trump_suit = suit
+        self.set_message(f"You set {SUIT_NAMES[suit]} {suit} as trump (hidden).")
+        self.finalize_trump()
+
+    def finalize_trump(self):
+        self.game.deal_remaining()
+        self.game.phase = "PLAY"
+        self.game.current_player = self.game.bidder_start
+        self.game.trick_leader = self.game.current_player
+        self.refresh_all()
+        self.offer_double()
+
+    def offer_double(self):
+        bt = self.game.players[self.game.bid_winner].team
+        ht = self.game.players[0].team
+        if ht != bt:
+            self.refresh_all()
+            self.canvas.create_text(self.W // 2, 410, text="Opponents bid! DOUBLE?",
+                                    font=("Arial", 14, "bold"), fill="white", tags="ui")
+            self.draw_button(self.W // 2 - 130, 432, 120, 40, "DOUBLE x2",
+                             self.human_double, bg="#f0c040")
+            self.draw_button(self.W // 2 + 10, 432, 80, 40, "No",
+                             self.skip_double, bg="#5cb85c", fg="white")
+        else:
+            opp = [p for p in self.game.players if p.team != bt]
+            strong = any(sum(c.points for c in p.hand) >= 10 for p in opp)
+            if strong and self.game.bid_amount >= 19:
+                self.game.multiplier = 2
+                self.game.doubled_by = opp[0].index
+                self.set_message("Opponents DOUBLED! (x2)")
+                self.root.after(1000, self.offer_redouble)
+            else:
+                self.start_play()
+
+    def human_double(self):
+        self.game.multiplier = 2
+        self.sound.play("double")
+        self.game.doubled_by = 0
+        self.set_message("You DOUBLED! (x2)")
+        self.root.after(800, self.offer_redouble)
+
+    def skip_double(self):
+        self.start_play()
+
+    def offer_redouble(self):
+        bt = self.game.players[self.game.bid_winner].team
+        ht = self.game.players[0].team
+        if ht == bt:
+            self.refresh_all()
+            self.canvas.create_text(self.W // 2, 410, text="You were doubled! REDOUBLE?",
+                                    font=("Arial", 14, "bold"), fill="white", tags="ui")
+            self.draw_button(self.W // 2 - 140, 432, 140, 40, "REDOUBLE x4",
+                             self.human_redouble, bg="#f0c040")
+            self.draw_button(self.W // 2 + 20, 432, 80, 40, "No",
+                             self.skip_redouble, bg="#5cb85c", fg="white")
+        else:
+            bidder = self.game.players[self.game.bid_winner]
+            if sum(c.points for c in bidder.hand) >= 14:
+                self.game.multiplier = 4
+                self.game.redoubled = True
+                self.set_message("Bidding team REDOUBLED! (x4)")
+                self.root.after(1000, self.start_play)
+            else:
+                self.start_play()
+
+    def human_redouble(self):
+        self.game.multiplier = 4
+        self.sound.play("double")
+        self.game.redoubled = True
+        self.set_message("You REDOUBLED! (x4)")
+        self.root.after(800, self.start_play)
+
+    def skip_redouble(self):
+        self.start_play()
+
+    def start_play(self):
+        self.message_text = ""
+        self.refresh_all()
+        self.process_play()
+
+    def process_play(self):
+        if self.game.tricks_count >= 8:
+            self.game.phase = "ROUND_END"
+            self.root.after(1200, self.process_round_end)
+            return
+        self.refresh_all()
+        cur = self.game.current_player
+        player = self.game.players[cur]
+        self.maybe_show_extra_buttons()
+        if player.is_human:
+            pass
+        else:
+            self.root.after(1000, lambda: self.ai_play(cur))
+
+    def maybe_show_extra_buttons(self):
+        human = self.game.players[0]
+        g = self.game
+        if (g.phase == "PLAY" and g.trump_revealed
+                and not g.pair_claimed[human.team] and g.can_claim_pair(human)):
+            self.draw_button(self.W // 2 - 150, 540, 300, 34,
+                             "♚ ♛  Claim PAIR (King+Queen)  +4",
+                             self.human_claim_pair, bg=COL_ACCENT, fg="white")
+
+    def human_claim_pair(self):
+        if self.game.claim_pair(0):
+            self.set_message("PAIR claimed (King+Queen of trump)! +4 ♚♛")
+        self.refresh_all()
+        self.maybe_show_extra_buttons()
+
+    def human_reveal_trump(self):
+        if not self.game.can_reveal_trump(self.game.players[0]):
+            return
+        self.game.trump_revealed = True
+        self.set_message(f"Trump revealed: {SUIT_NAMES[self.game.trump_suit]} {self.game.trump_suit}")
+        self.refresh_all()
+        self.maybe_show_extra_buttons()
+
+    def human_play(self, card):
+        if self.game.current_player != 0 or self.anim_running:
+            return
+        if card not in self.game.valid_moves(self.game.players[0]):
+            return
+        self.game.play_card(0, card)
+        self.sound.play("card")
+        self.hover_card = None
+        cx, cy = self.W // 2 - 60, 380
+        self.refresh_all()
+        self.animate_card(card, (self.W // 2, 665), (cx, cy + 70), self.advance_after_play)
+
+    def ai_play(self, pidx):
+        player = self.game.players[pidx]
+        g = self.game
+        if (not g.trump_revealed and g.current_trick
+                and not player.has_suit(g.current_trick[0][1].suit)):
+            if player.has_suit(g.trump_suit):
+                g.trump_revealed = True
+                self.set_message(f"{player.name} revealed trump: {g.trump_suit}")
+        if (g.trump_revealed and not g.pair_claimed[player.team]
+                and g.can_claim_pair(player)):
+            g.claim_pair(pidx)
+        card = self.ai_choose_card(player)
+        g.play_card(pidx, card)
+        self.sound.play("card")
+        cx, cy = self.W // 2 - 60, 380
+        slots = {1: (cx - 90, cy), 2: (cx, cy - 70), 3: (cx + 90, cy)}
+        froms = {1: (160, 330), 2: (self.W // 2, 150), 3: (self.W - 200, 330)}
+        self.refresh_all()
+        self.animate_card(card, froms[pidx], slots[pidx], self.advance_after_play)
+
+    def ai_choose_card(self, player):
+        g = self.game
+        valid = g.valid_moves(player)
+        trump = g.trump_suit if g.trump_revealed else None
+        if not g.current_trick:
+            nt = [c for c in valid if c.suit != trump]
+            pool = nt if nt else valid
+            return max(pool, key=lambda c: c.points * 2 + RANK_ORDER[c.rank])
+        lead = g.current_trick[0][1].suit
+        bc = g.current_trick[0][1]
+        bi = g.current_trick[0][0]
+        for (pi, c) in g.current_trick[1:]:
+            bc, bi = g._compare_cards(bc, bi, c, pi, lead, trump)
+        partner = (g.players[bi].team == player.team)
+        if partner:
+            return min(valid, key=lambda c: RANK_ORDER[c.rank])
+        winners = []
+        for c in valid:
+            _, ti = g._compare_cards(bc, bi, c, player.index, lead, trump)
+            if ti == player.index:
+                winners.append(c)
+        if winners:
+            return min(winners, key=lambda c: RANK_ORDER[c.rank])
+        return min(valid, key=lambda c: c.points * 2 + RANK_ORDER[c.rank])
+
+    def advance_after_play(self):
+        self.canvas.delete("anim")
+        self.refresh_all()
+        if len(self.game.current_trick) == 4:
+            self.root.after(1100, self.finish_trick)
+        else:
+            self.game.current_player = (self.game.current_player + 1) % 4
+            self.root.after(650, self.process_play)
+
+    def finish_trick(self):
+        winner = self.game.resolve_trick()
+        wname = self.game.players[winner].name
+        self.set_message(f"{wname} wins the trick!  "
+                         f"You={self.game.tricks_won_points[0]}  "
+                         f"Opp={self.game.tricks_won_points[1]}")
+        self.refresh_all()
+        self.root.after(1200, self.process_play)
+
+    def process_round_end(self):
+        self.game.trump_revealed = True
+        result = self.game.score_round()
+        self.refresh_all()
+        bidder = self.game.players[self.game.bid_winner].name
+        made = result['made']
+        msg = (f"Round Over!\n\nBid: {result['bid_amount']} by {bidder}\n"
+               f"Bidder team scored: {result['bidder_points']} points\n"
+               f"Multiplier: x{result['multiplier']}\n\n")
+        if made:
+            msg += f"✅ Bid MADE! Team {result['winner_team']} +{result['multiplier']} (Black→Red)"
+        else:
+            msg += f"❌ Bid FAILED! Team {result['winner_team']} +{result['multiplier']} (Black→Red)"
+        
+        if self.game.game_scores[0] >= 6 or self.game.game_scores[1] >= 6:
+            champ = "YOUR TEAM" if self.game.game_scores[0] >= 6 else "OPPONENTS"
+            messagebox.showinfo("GAME OVER", msg + f"\n\n🏆 {champ} WINS THE GAME! 🏆")
+            self.show_menu()
+        else:
+            messagebox.showinfo("Round Result", msg)
+            self.game.start_round()
+            self.refresh_all()
+            self.process_phase()
+
+
+if __name__ == '__main__':
+    if GUI_AVAILABLE:
+        root = tk.Tk()
+        app = Game29GUI(root)
+        root.mainloop()
+    else:
+        print("Tkinter not available — install python3-tk for GUI.")
