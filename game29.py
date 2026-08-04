@@ -122,6 +122,9 @@ class SoundPlayer:
             return None
         return None
 
+    def _detect_backend(self):
+        return None
+
 
 # =============================================================
 # 3) Core Game Objects
